@@ -2,3 +2,7 @@ langchain
 supabase
 dotenv
 PyPDF2
+streamlit
+openai
+langchain-community
+tiktoken
