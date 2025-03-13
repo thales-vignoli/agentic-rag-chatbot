@@ -1,8 +1,4 @@
-langchain==0.0.267
-openai==0.28.0
-supabase==1.0.3
-streamlit==1.24.0
-python-dotenv==1.0.0
-langchain-community==0.0.13
-langchain-openai==0.0.2
-pymupdf==1.23.7
+langchain
+supabase
+dotenv
+PyPDF2
