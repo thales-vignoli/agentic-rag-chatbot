@@ -1,4 +1,3 @@
-# app.py
 import os
 import streamlit as st
 from langchain.embeddings import OpenAIEmbeddings
@@ -6,6 +5,7 @@ from langchain.chat_models import ChatOpenAI
 from langchain.chains import ConversationalRetrievalChain
 from langchain.schema.retriever import BaseRetriever
 from langchain.schema import Document
+from langchain.prompts import PromptTemplate
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -35,20 +35,38 @@ def search_documents(query):
 # Criar um retriever personalizado
 class CustomRetriever(BaseRetriever):
     def _get_relevant_documents(self, query: str):
-        # Buscar documentos no Supabase
         docs = search_documents(query)
-        # Converter os documentos para o formato Document do LangChain
         return [Document(page_content=doc["content"], metadata=doc["metadata"]) for doc in docs]
 
+# Configurar o prompt personalizado
+prompt_template = """
+Use o seguinte histórico e contexto para responder à pergunta. Se o contexto não contiver a resposta, diga "Não sei".
+
+Histórico da conversa:
+{chat_history}
+
+Contexto:
+{context}
+
+Pergunta:
+{question}
+
+Resposta:
+"""
+prompt = PromptTemplate(
+    template=prompt_template,
+    input_variables=["chat_history", "context", "question"]
+)
+
 # Configurar a cadeia de RAG com histórico
+@st.cache_resource  # Cache para evitar recriar a cadeia toda vez
 def setup_rag_chain():
-    # Instanciar o retriever personalizado
     retriever = CustomRetriever()
-    
     chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
-        return_source_documents=True
+        return_source_documents=True,
+        combine_docs_chain_kwargs={"prompt": prompt}  # Passa o prompt personalizado
     )
     return chain
 
@@ -61,36 +79,47 @@ def main():
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
+    # Exibir histórico de chat
+    for question, answer in st.session_state.chat_history:
+        with st.chat_message("user"):
+            st.write(question)
+        with st.chat_message("assistant"):
+            st.write(answer)
+
     # Campo de entrada do usuário
-    user_query = st.text_input("Digite sua pergunta:", placeholder="Exemplo: Qual é o tema principal?")
+    user_query = st.chat_input("Exemplo: Qual é o tema principal?")  # Correção aqui
 
     if user_query:
-        # Configurar a cadeia de RAG
-        rag_chain = setup_rag_chain()
+        # Adicionar pergunta ao histórico
+        st.session_state.chat_history.append((user_query, ""))  # Placeholder para a resposta
+        with st.chat_message("user"):
+            st.write(user_query)
 
-        # Executar a consulta com o histórico
-        result = rag_chain({
-            "question": user_query,
-            "chat_history": st.session_state.chat_history
-        })
+        # Configurar e executar a cadeia de RAG
+        rag_chain = setup_rag_chain()
+        with st.spinner("Pensando..."):
+            result = rag_chain({
+                "question": user_query,
+                "chat_history": [(q, a) for q, a in st.session_state.chat_history[:-1]]  # Exclui a pergunta atual
+            })
 
         # Extrair resposta e documentos de origem
         answer = result["answer"]
         source_documents = result.get("source_documents", [])
 
-        # Atualizar histórico (mantido na memória, mas não exibido)
-        st.session_state.chat_history.append((user_query, answer))
+        # Atualizar o último item do histórico com a resposta
+        st.session_state.chat_history[-1] = (user_query, answer)
 
         # Exibir a resposta
-        st.write("**Resposta:**")
-        st.write(answer)
+        with st.chat_message("assistant"):
+            st.write(answer)
 
         # Exibir a origem do documento (se disponível)
         if source_documents:
-            st.write("**Fonte:**")
-            for doc in source_documents:
-                source_path = doc.metadata.get("source", "Desconhecido")
-                st.write(f"- {source_path}")
+            with st.expander("Fontes"):
+                for doc in source_documents:
+                    source_path = doc.metadata.get("source", "Desconhecido")
+                    st.write(f"- {source_path}")
 
 if __name__ == "__main__":
     main()
