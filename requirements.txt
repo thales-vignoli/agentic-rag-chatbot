@@ -1,8 +1,10 @@
 langchain
 supabase
-dotenv
+python-dotenv  # Nome correto da biblioteca (dotenv é o import)
 PyPDF2
 streamlit
 openai
 langchain-community
 tiktoken
+PyMuPDF  # Adicionado para prévia do PDF
+Pillow   # Adicionado para manipulação de imagens

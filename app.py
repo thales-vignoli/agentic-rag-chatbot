@@ -8,9 +8,13 @@ from langchain.schema import Document
 from langchain.prompts import PromptTemplate
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import fitz  # PyMuPDF para prévia do PDF
+from PIL import Image
+import io
+from ingest import ingest_pdf_to_supabase  # Importa a função de ingestão
 
 # Configuração básica do Streamlit
-st.set_page_config(page_title="RAG Document Chat", page_icon="📄")
+st.set_page_config(page_title="RAG Document Chat", page_icon="📄", layout="wide")
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -28,7 +32,7 @@ def search_documents(query):
     query_embedding = embeddings.embed_query(query)
     response = supabase.rpc("match_documents", {
         "query_embedding": query_embedding,
-        "match_count": 5  # Retorna os 5 documentos mais similares
+        "match_count": 5
     }).execute()
     return [{"content": doc["content"], "metadata": doc["metadata"]} for doc in response.data]
 
@@ -59,67 +63,95 @@ prompt = PromptTemplate(
 )
 
 # Configurar a cadeia de RAG com histórico
-@st.cache_resource  # Cache para evitar recriar a cadeia toda vez
+@st.cache_resource
 def setup_rag_chain():
     retriever = CustomRetriever()
     chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
         return_source_documents=True,
-        combine_docs_chain_kwargs={"prompt": prompt}  # Passa o prompt personalizado
+        combine_docs_chain_kwargs={"prompt": prompt}
     )
     return chain
 
 # Interface no Streamlit
 def main():
-    st.title("RAG Document Chat")
-    st.write("Faça perguntas sobre o documento e receba respostas baseadas no conteúdo.")
+    # Sidebar para upload e prévia
+    with st.sidebar:
+        st.header("Upload do Documento")
+        uploaded_file = st.file_uploader("Escolha um arquivo PDF", type="pdf")
+        
+        if uploaded_file:
+            # Salvar o arquivo temporariamente
+            pdf_path = "temp.pdf"
+            with open(pdf_path, "wb") as f:
+                f.write(uploaded_file.read())
+            
+            # Mostrar prévia do PDF
+            st.subheader("Prévia do Documento")
+            doc = fitz.open(pdf_path)
+            page = doc.load_page(0)  # Primeira página
+            pix = page.get_pixmap()
+            img = Image.open(io.BytesIO(pix.tobytes()))
+            st.image(img, use_column_width=True)
+            
+            # Botão para processar
+            if st.button("Processar e Conversar"):
+                with st.spinner("Processando o documento..."):
+                    ingest_pdf_to_supabase(pdf_path)  # Chama a função de ingestão
+                st.session_state.processed = True
+                st.success("Documento processado! Agora você pode conversar.")
 
-    # Inicializar o histórico de conversa no estado da sessão
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+    # Área principal para o chat
+    if "processed" in st.session_state and st.session_state.processed:
+        st.title("Converse com seu Documento")
+        
+        # Inicializar o histórico de conversa
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
 
-    # Exibir histórico de chat
-    for question, answer in st.session_state.chat_history:
-        with st.chat_message("user"):
-            st.write(question)
-        with st.chat_message("assistant"):
-            st.write(answer)
+        # Exibir histórico de chat
+        for question, answer in st.session_state.chat_history:
+            with st.chat_message("user"):
+                st.write(question)
+            with st.chat_message("assistant"):
+                st.write(answer)
 
-    # Campo de entrada do usuário
-    user_query = st.chat_input("Exemplo: Qual é o tema principal?")  # Correção aqui
+        # Campo de entrada do usuário
+        user_query = st.chat_input("Exemplo: Qual é o tema principal?")
+        
+        if user_query:
+            st.session_state.chat_history.append((user_query, ""))
+            with st.chat_message("user"):
+                st.write(user_query)
 
-    if user_query:
-        # Adicionar pergunta ao histórico
-        st.session_state.chat_history.append((user_query, ""))  # Placeholder para a resposta
-        with st.chat_message("user"):
-            st.write(user_query)
+            # Executar a cadeia de RAG
+            rag_chain = setup_rag_chain()
+            with st.spinner("Pensando..."):
+                result = rag_chain({
+                    "question": user_query,
+                    "chat_history": [(q, a) for q, a in st.session_state.chat_history[:-1]]
+                })
 
-        # Configurar e executar a cadeia de RAG
-        rag_chain = setup_rag_chain()
-        with st.spinner("Pensando..."):
-            result = rag_chain({
-                "question": user_query,
-                "chat_history": [(q, a) for q, a in st.session_state.chat_history[:-1]]  # Exclui a pergunta atual
-            })
+            answer = result["answer"]
+            source_documents = result.get("source_documents", [])
+            st.session_state.chat_history[-1] = (user_query, answer)
 
-        # Extrair resposta e documentos de origem
-        answer = result["answer"]
-        source_documents = result.get("source_documents", [])
+            # Exibir a resposta
+            with st.chat_message("assistant"):
+                st.write(answer)
 
-        # Atualizar o último item do histórico com a resposta
-        st.session_state.chat_history[-1] = (user_query, answer)
+            # Exibir a origem do documento
+            if source_documents:
+                with st.expander("Fontes"):
+                    for doc in source_documents:
+                        source_path = doc.metadata.get("source", "Desconhecido")
+                        st.write(f"- {source_path}")
+    else:
+        st.write("Faça o upload de um PDF na barra lateral para começar.")
 
-        # Exibir a resposta
-        with st.chat_message("assistant"):
-            st.write(answer)
-
-        # Exibir a origem do documento (se disponível)
-        if source_documents:
-            with st.expander("Fontes"):
-                for doc in source_documents:
-                    source_path = doc.metadata.get("source", "Desconhecido")
-                    st.write(f"- {source_path}")
+if "processed" not in st.session_state:
+    st.session_state.processed = False
 
 if __name__ == "__main__":
     main()
